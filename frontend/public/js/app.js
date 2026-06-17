@@ -24,23 +24,100 @@ function goChat(msg) {
   setTimeout(() => { document.getElementById('chat-input').value = msg; sendMsg(); }, 300);
 }
 
-// ── SPEECH (TTS) ──
-function speak(text, rate) {
+// ================================================================
+// ── SPEECH (TTS) — Phiên bản ổn định cho production HTTPS ──
+// ================================================================
+let voicesLoaded = false;
+let pendingSpeak = null;
+let resumeTimer = null;
+
+function initTTS() {
+  if (!window.speechSynthesis) return;
+
+  const tryLoad = () => {
+    const voices = window.speechSynthesis.getVoices();
+    if (voices.length > 0) {
+      voicesLoaded = true;
+      if (pendingSpeak) {
+        const p = pendingSpeak;
+        pendingSpeak = null;
+        _doSpeak(p.text, p.rate, p.onEnd);
+      }
+    }
+  };
+
+  tryLoad();
+  window.speechSynthesis.onvoiceschanged = tryLoad;
+  setTimeout(tryLoad, 500);
+  setTimeout(tryLoad, 1500);
+}
+
+function _doSpeak(text, rate, onEnd) {
   if (!window.speechSynthesis) return null;
-  stopSpeech();
-  const u = new SpeechSynthesisUtterance(text);
+  window.speechSynthesis.cancel();
+  if (resumeTimer) { clearInterval(resumeTimer); resumeTimer = null; }
+
+  const safeText = text.length > 500 ? text.substring(0, 500) + '.' : text;
+  const u = new SpeechSynthesisUtterance(safeText);
   u.lang = 'vi-VN';
   u.rate = rate || globalSpeed;
+  u.volume = 1;
+
   const voices = window.speechSynthesis.getVoices();
-  const picked = selectedVoiceName
+  const viVoice = selectedVoiceName
     ? voices.find(v => v.name === selectedVoiceName)
-    : voices.find(v => v.lang && v.lang.startsWith('vi'));
-  if (picked) u.voice = picked;
+    : voices.find(v => v.lang === 'vi-VN')
+      || voices.find(v => v.lang === 'vi')
+      || voices.find(v => v.lang && v.lang.startsWith('vi'));
+  if (viVoice) u.voice = viVoice;
+
+  // Fix Chrome bug: TTS dừng sau ~15 giây
+  resumeTimer = setInterval(() => {
+    if (!window.speechSynthesis.speaking) {
+      clearInterval(resumeTimer);
+      resumeTimer = null;
+      return;
+    }
+    window.speechSynthesis.pause();
+    window.speechSynthesis.resume();
+  }, 10000);
+
+  u.onend = () => {
+    if (resumeTimer) { clearInterval(resumeTimer); resumeTimer = null; }
+    if (onEnd) onEnd();
+  };
+  u.onerror = () => {
+    if (resumeTimer) { clearInterval(resumeTimer); resumeTimer = null; }
+    if (onEnd) onEnd();
+  };
+
   window.speechSynthesis.speak(u);
   return u;
 }
 
+function speak(text, rate, onEnd) {
+  if (!window.speechSynthesis || !text || !text.trim()) return null;
+
+  if (!voicesLoaded) {
+    pendingSpeak = { text, rate, onEnd };
+    initTTS();
+    // Fallback: đọc sau 2 giây dù giọng chưa load
+    setTimeout(() => {
+      if (pendingSpeak) {
+        const p = pendingSpeak;
+        pendingSpeak = null;
+        _doSpeak(p.text, p.rate, p.onEnd);
+      }
+    }, 2000);
+    return null;
+  }
+
+  return _doSpeak(text, rate, onEnd);
+}
+
 function stopSpeech() {
+  pendingSpeak = null;
+  if (resumeTimer) { clearInterval(resumeTimer); resumeTimer = null; }
   if (window.speechSynthesis) window.speechSynthesis.cancel();
   document.querySelectorAll('.read-btn.reading').forEach(b => {
     b.classList.remove('reading');
@@ -55,29 +132,49 @@ function readText(text, btn) {
   stopSpeech();
   if (wasReading) return;
   if (btn) { btn.classList.add('reading'); btn.innerHTML = '<span class="pulse-dot"></span>Đang đọc...'; }
-  const u = speak(text);
-  if (u && btn) {
-    u.onend = () => { btn.classList.remove('reading'); btn.textContent = '🔊 Nghe'; };
-    u.onerror = () => { btn.classList.remove('reading'); btn.textContent = '🔊 Nghe'; };
-  }
+  speak(text, globalSpeed, () => {
+    if (btn) { btn.classList.remove('reading'); btn.textContent = '🔊 Nghe'; }
+  });
 }
 
 function readDetail() {
-  const rate = parseFloat(document.getElementById('d-speed').value) || 1;
+  const rate = parseFloat(document.getElementById('d-speed')?.value) || 1;
   const btn = document.getElementById('d-read-btn');
-  btn.innerHTML = '<span class="pulse-dot"></span>Đang đọc...';
-  const u = speak(detailSpeechText, rate);
-  if (u) {
-    u.onend = () => { btn.textContent = '▶ Nghe'; };
-    u.onerror = () => { btn.textContent = '▶ Nghe'; };
-  }
+  if (btn) btn.innerHTML = '<span class="pulse-dot"></span>Đang đọc...';
+  speak(detailSpeechText, rate, () => {
+    if (btn) btn.textContent = '▶ Nghe';
+  });
 }
 
 function toggleTTS() {
   autoRead = !autoRead;
   const sw = document.getElementById('tts-sw');
-  sw.classList.toggle('on', autoRead);
+  if (sw) sw.classList.toggle('on', autoRead);
+  if (autoRead) {
+    initTTS();
+    // Unlock audio trên iOS/mobile bằng utterance im lặng
+    if (window.speechSynthesis) {
+      const silent = new SpeechSynthesisUtterance(' ');
+      silent.volume = 0;
+      window.speechSynthesis.speak(silent);
+    }
+  }
 }
+
+// Khởi động TTS khi trang load
+window.addEventListener('load', initTTS);
+
+// Unlock audio khi user tương tác lần đầu (bắt buộc trên iOS Safari)
+document.addEventListener('click', function unlockAudio() {
+  if (window.speechSynthesis) {
+    const silent = new SpeechSynthesisUtterance(' ');
+    silent.volume = 0;
+    window.speechSynthesis.speak(silent);
+    window.speechSynthesis.cancel();
+  }
+  if (!voicesLoaded) initTTS();
+  document.removeEventListener('click', unlockAudio);
+}, { once: true });
 
 // ── VOICE INPUT ──
 function startVoice() {
@@ -230,11 +327,10 @@ async function openDetail(id) {
     document.getElementById('detail-view').style.display = '';
     window.scrollTo(0,0);
 
-    // Thêm biểu mẫu liên quan vào cuối trang chi tiết
     const detailBody = document.querySelector('.detail-body');
     if (detailBody) {
       let bmContainer = document.getElementById('bm-in-detail');
-      if (bmContainer) bmContainer.remove(); // Xóa cũ nếu có
+      if (bmContainer) bmContainer.remove();
       bmContainer = document.createElement('div');
       bmContainer.id = 'bm-in-detail';
       detailBody.appendChild(bmContainer);
@@ -251,11 +347,10 @@ function closeDetail() {
   document.getElementById('detail-view').style.display = 'none';
 }
 
-// ── BIỂU MẪU: State ──
+// ── BIỂU MẪU ──
 let allBieuMau = [];
 let bmFilter = { cap: '', nhom: '', q: '' };
 
-// ── BIỂU MẪU: Load danh sách ──
 async function loadBieuMau() {
   const list = document.getElementById('bm-list');
   if (!list) return;
@@ -284,28 +379,23 @@ async function loadNhomFilter() {
 function renderBieuMau() {
   const { cap, nhom, q } = bmFilter;
   const capLabel = { xa: 'Cấp xã', so: 'Cấp sở', ca: 'Cả hai cấp' };
-
   const filtered = allBieuMau.filter(bm =>
     (!cap || bm.cap === cap || bm.cap === 'ca') &&
     (!nhom || bm.nhom === nhom) &&
     (!q || bm.ten.toLowerCase().includes(q.toLowerCase()) ||
            (bm.mo_ta||'').toLowerCase().includes(q.toLowerCase()))
   );
-
   const list = document.getElementById('bm-list');
   if (!filtered.length) {
     list.innerHTML = '<div class="loading">Không tìm thấy biểu mẫu phù hợp.</div>';
     return;
   }
-
-  // Nhóm theo cap
   const groups = {};
   filtered.forEach(bm => {
     const g = capLabel[bm.cap] || bm.cap;
     if (!groups[g]) groups[g] = [];
     groups[g].push(bm);
   });
-
   list.innerHTML = Object.entries(groups).map(([groupName, items]) => `
     <div class="bm-group">
       <div class="bm-group-title">${groupName} — ${items.length} biểu mẫu</div>
@@ -324,9 +414,7 @@ function renderBieuMau() {
             <a href="/api/bieu-mau/tai/${bm.id}"
                class="bm-download-btn"
                onclick="countDownload(${bm.id})"
-               download>
-              📥 Tải về
-            </a>
+               download>📥 Tải về</a>
           </div>
         </div>`).join('')}
     </div>`).join('');
@@ -353,7 +441,6 @@ function countDownload(id) {
   if (bm) bm.luot_tai = (bm.luot_tai || 0) + 1;
 }
 
-// ── BIỂU MẪU: Hiện biểu mẫu liên quan trong trang chi tiết TTHC ──
 async function loadBieuMauForTTHC(tthcId, containerEl) {
   try {
     const res = await fetch(`/api/bieu-mau/by-tthc/${tthcId}`);
@@ -374,8 +461,7 @@ async function loadBieuMauForTTHC(tthcId, containerEl) {
         <div class="steps-title">📥 Biểu mẫu cần tải (${maus.length} file)</div>
         <div style="display:flex;flex-direction:column;gap:7px;margin-top:10px">
           ${maus.map(bm => `
-            <a href="/api/bieu-mau/tai/${bm.id}"
-               download
+            <a href="/api/bieu-mau/tai/${bm.id}" download
                style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px;background:#F7F6F3;border:1px solid #E5E2DC;border-radius:8px;text-decoration:none;color:#1C1C1C;transition:all .2s"
                onmouseover="this.style.borderColor='#1A2744'"
                onmouseout="this.style.borderColor='#E5E2DC'">
