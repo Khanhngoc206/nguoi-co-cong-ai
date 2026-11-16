@@ -12,6 +12,9 @@ const db        = require('./db');
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
+// MỚI: cần thiết khi chạy sau proxy của Render (hết cảnh báo X-Forwarded-For)
+app.set('trust proxy', 1);
+
 // ── Security & Middleware ──
 app.use(helmet({ contentSecurityPolicy: false }));
 
@@ -65,6 +68,9 @@ app.use((err, req, res, next) => {
 
 // ── Khởi động server ──
 async function start() {
+  // MỚI: chỉ in true/false, không lộ mật khẩu
+  console.log('DATABASE_URL có giá trị:', !!process.env.DATABASE_URL);
+
   try {
     await db.query('SELECT 1');
     console.log('✅ Kết nối PostgreSQL thành công');
@@ -83,19 +89,20 @@ async function start() {
           'Cán bộ Phòng VH-XH'
         ]
       );
-      console.log(`✅ Tài khoản admin mặc định: ${process.env.ADMIN_USERNAME || 'admin'} / ${process.env.ADMIN_PASSWORD || 'Admin@123'}`);
+      console.log(`✅ Đã tạo tài khoản admin: ${process.env.ADMIN_USERNAME || 'admin'}`);
       console.log('⚠️  Hãy đổi mật khẩu sau khi đăng nhập lần đầu!');
     }
 
     app.listen(PORT, () => {
-      console.log(`🚀 Server đang chạy tại http://localhost:${PORT}`);
-      console.log(`📋 Admin panel: http://localhost:${PORT}/admin`);
-      console.log(`📥 Biểu mẫu API: http://localhost:${PORT}/api/bieu-mau`);
+      console.log(`🚀 Server đang chạy tại cổng ${PORT}`);
+      console.log(`📋 Admin panel: /admin`);
+      console.log(`📥 Biểu mẫu API: /api/bieu-mau`);
     });
 
   } catch (err) {
-    console.error('❌ Không thể khởi động server:', err.message);
-    console.error('Kiểm tra lại cấu hình PostgreSQL trong file .env');
+    // MỚI: in đúng lý do lỗi (Node mới trả AggregateError nên message bị rỗng)
+    console.error('❌ Không thể khởi động server:', err.message || err.code || String(err));
+    if (err.errors) err.errors.forEach(e => console.error(' -', e.code, e.address, e.port));
     process.exit(1);
   }
 }
